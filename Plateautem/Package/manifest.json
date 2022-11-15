@@ -1,0 +1,9 @@
+﻿{
+  "name": "Plateautem",
+  "description": "Terrain flattening totem.",
+  "version_number": "0.1.0",
+  "website_url": "",
+  "dependencies": [
+    "ValheimModding-Jotunn-2.7.9",
+  ]
+}
