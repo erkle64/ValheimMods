@@ -1,0 +1,28 @@
+ManifestFileVersion: 0
+CRC: 2554544585
+Hashes:
+  AssetFileHash:
+    serializedVersion: 2
+    Hash: fa9d95e77bae9f08abd9d8e2d7b462aa
+  TypeTreeHash:
+    serializedVersion: 2
+    Hash: b73600c22286579bd007cf927acd269e
+HashAppended: 0
+ClassTypes:
+- Class: 1
+  Script: {instanceID: 0}
+- Class: 4
+  Script: {instanceID: 0}
+- Class: 28
+  Script: {instanceID: 0}
+- Class: 82
+  Script: {instanceID: 0}
+- Class: 83
+  Script: {instanceID: 0}
+- Class: 213
+  Script: {instanceID: 0}
+SerializeReferenceClassIdentifiers: []
+Assets:
+- Assets/Sprites/plateautem.png
+- Assets/Prefabs/DroneAudioSource.prefab
+Dependencies: []

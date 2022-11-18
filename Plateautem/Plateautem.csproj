@@ -83,11 +83,12 @@
   <ItemGroup>
     <Compile Include="Plateautem.cs" />
     <Compile Include="Properties\IgnoreAccessModifiers.cs" />
-    <Compile Include="PlateautemPlugin.cs" />
+    <Compile Include="Plugin.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="app.config" />
+    <EmbeddedResource Include="Embedded\plateautem" />
     <None Include="packages.config" />
     <None Include="README.md" />
   </ItemGroup>
