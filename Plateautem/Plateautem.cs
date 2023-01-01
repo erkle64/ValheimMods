@@ -1,11 +1,10 @@
 ﻿using BepInEx;
 using BepInEx.Configuration;
-using Jotunn.Configs;
+using HarmonyLib;
+using Jotunn.Entities;
 using Jotunn.Managers;
-using Mono.Cecil;
 using System.Collections;
 using System.Collections.Generic;
-using System.Security.Policy;
 using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
@@ -14,8 +13,8 @@ namespace Plateautem
 {
     public class Plateautem : MonoBehaviour, Interactable, Hoverable
     {
-        [SerializeField] private TerrainOp flattenTerrainOp = null;
-        [SerializeField] private EffectList flattenPlaceEffect = null;
+        private static TerrainOp flattenTerrainOp;
+        private EffectList flattenPlaceEffect = null;
 
         [SerializeField] private CircleProjector circleProjector = null;
         [SerializeField] private GameObject enabledEffect = null;
@@ -26,9 +25,6 @@ namespace Plateautem
         [SerializeField] private Transform flareTransform = null;
         [SerializeField] private Transform droneAudioSourceTransform = null;
         [SerializeField] private AudioSource droneAudioSource = null;
-        private Vector3 targetLightPosition;
-        private Vector3 currentLightPosition;
-        private float lightSpeed;
         private float targetDroneAudioVolume = 0.0f;
 
         private struct FuelItem
@@ -43,10 +39,25 @@ namespace Plateautem
         private const string stoneItemPrefabName = "Stone";
         private const string stoneItemDisplayName = "$item_stone";
 
-        private const float placementSpacing = 2.0f;
-        private const float placementRadiusScale = placementSpacing / (2.0f * Mathf.PI);
+        private static string[] lowerToolPrefabNames = new string[] {
+            "PickaxeAntler", "PickaxeBronze", "PickaxeIron", "PickaxeBlackMetal"
+        };
+        private static string[] lowerToolDisplayNames = new string[] {
+            "$item_pickaxe_antler", "$item_pickaxe_bronze", "$item_pickaxe_iron", "$item_pickaxe_blackmetal"
+        };
+
+        private static string[] raiseToolPrefabNames = new string[] { "Hoe" };
+        private static string[] raiseToolDisplayNames = new string[] { "$item_hoe" };
+
+        private const float placementSpacing = 2.6f;
+        private const float circlePadding = 1.0f;
 
         private int currentFuelItemIndex = 0;
+        private float lastUseTime;
+        private float previousScanTime = 0.0f;
+        private float previousScanTime2 = 0.0f;
+        private float previousScanProgress = 0.0f;
+        private float targetScanProgress = 0.0f;
 
         private static ConfigEntry<string> configFuelItems;
         private static ConfigEntry<float> configFuelPerScan;
@@ -58,23 +69,39 @@ namespace Plateautem
         private static ConfigEntry<int> configMaximumStone;
         private static ConfigEntry<float> configDefaultFlatteningRadius;
         private static ConfigEntry<float> configMaximumFlatteningRadius;
-        private static ConfigEntry<float> configFlatteningTime;
+        private static ConfigEntry<float> configMinFlatteningTime;
+        private static ConfigEntry<float> configMaxFlatteningTime;
         private static ConfigEntry<float> configScanningTime;
+        private static ConfigEntry<bool> configDoPainting;
+        private static ConfigEntry<bool> configRequireLowerTool;
+        private static ConfigEntry<bool> configRequireRaiseTool;
+        private static ConfigEntry<float>[] configLowerToolBonus;
+        private static ConfigEntry<float>[] configRaiseToolBonus;
         private static ConfigEntry<KeyboardShortcut> configIncreaseRadiusKey;
         private static ConfigEntry<KeyboardShortcut> configDecreaseRadiusKey;
         private static ConfigEntry<KeyboardShortcut> configResetScanKey;
         private static ConfigEntry<KeyboardShortcut> configEjectFuelKey;
         private static ConfigEntry<KeyboardShortcut> configEjectStoneKey;
-        private float lastUseTime;
+        private static ConfigEntry<KeyboardShortcut> configEjectToolsKey;
+        private static ConfigEntry<bool> configShowMainKeys;
+        private static ConfigEntry<bool> configShowExtraKeys;
+        private static ConfigEntry<bool> configShowFillBars;
+        private static ConfigEntry<bool> configShowFillNumbers;
+        private static ConfigEntry<bool> configShowTools;
+        private static ConfigEntry<bool> configShowSelection;
+
         public const string msgNoFuel = "$piece_plateautem_noFuel";
         public const string msgHold = "$piece_plateautem_hold";
         public const string msgAll = "$piece_plateautem_all";
         public const string msgFuel = "$piece_plateautem_fuel";
+        public const string msgTools = "$piece_plateautem_tools";
         public const string msgRadius = "$piece_plateautem_radius";
         public const string msgResetScan = "$piece_plateautem_reset";
         public const string msgSelectFuel = "$piece_plateautem_selectFuel";
+        public const string msgEject = "$piece_plateautem_eject";
         public const string msgEjectFuel = "$piece_plateautem_ejectFuel";
         public const string msgEjectStone = "$piece_plateautem_ejectStone";
+        public const string msgSelectMode = "$piece_plateautem_selectMode";
 
         private const string zdonCurrentRadius = "current_radius";
         private int zdoidCurrentRadius;
@@ -88,16 +115,7 @@ namespace Plateautem
             set
             {
                 if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return;
-                if (netView.IsOwner())
-                {
-                    netView.GetZDO().Set(zdoidCurrentRadius, value);
-                    UpdateCircle(value);
-                }
-                else
-                {
-                    netView.InvokeRPC("SetCurrentRadius", value);
-                    UpdateCircle(value);
-                }
+                netView.GetZDO().Set(zdoidCurrentRadius, value);
             }
         }
 
@@ -133,35 +151,84 @@ namespace Plateautem
             }
         }
 
-        private const string zdonScanRadius = "placement_radius";
-        private int zdoidScanRadius;
-        private float currentScanRadius
+        private const string zdonScanProgress = "scan_progress";
+        private int zdoidScanProgress;
+        private float currentScanProgress
         {
             get
             {
                 if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return 0;
-                return netView.GetZDO().GetFloat(zdoidScanRadius, 0.0f);
+                return netView.GetZDO().GetFloat(zdoidScanProgress, 0.0f);
             }
             set
             {
                 if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return;
-                netView.GetZDO().Set(zdoidScanRadius, value);
+                netView.GetZDO().Set(zdoidScanProgress, value);
             }
         }
 
-        private const string zdonScanAngle = "scan_angle";
-        private int zdoidScanAngle;
-        private float currentScanAngle
+
+        private const string zdonScanIndex = "scan_index";
+        private int zdoidScanIndex;
+        private int currentScanIndex
         {
             get
             {
                 if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return 0;
-                return netView.GetZDO().GetFloat(zdoidScanAngle, 0.0f);
+                return netView.GetZDO().GetInt(zdoidScanIndex, 0);
             }
             set
             {
                 if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return;
-                netView.GetZDO().Set(zdoidScanAngle, value);
+                netView.GetZDO().Set(zdoidScanIndex, value);
+            }
+        }
+
+        private const string zdonScanSpeed = "scan_speed";
+        private int zdoidScanSpeed;
+        private float currentScanSpeed
+        {
+            get
+            {
+                if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return 0;
+                return netView.GetZDO().GetFloat(zdoidScanSpeed, (configScanningTime.Value <= float.Epsilon) ? 1.0f : 1.0f / configScanningTime.Value);
+            }
+            set
+            {
+                if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return;
+                netView.GetZDO().Set(zdoidScanSpeed, value);
+            }
+        }
+
+        private const string zdonLowerToolIndex = "lower_tool_index";
+        private int zdoidLowerToolIndex;
+        private int currentLowerToolIndex
+        {
+            get
+            {
+                if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return -1;
+                return netView.GetZDO().GetInt(zdoidLowerToolIndex, -1);
+            }
+            set
+            {
+                if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return;
+                netView.GetZDO().Set(zdoidLowerToolIndex, value);
+            }
+        }
+
+        private const string zdonRaiseToolIndex = "raise_item_index";
+        private int zdoidRaiseToolIndex;
+        private int currentRaiseToolIndex
+        {
+            get
+            {
+                if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return -1;
+                return netView.GetZDO().GetInt(zdoidRaiseToolIndex, -1);
+            }
+            set
+            {
+                if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return;
+                netView.GetZDO().Set(zdoidRaiseToolIndex, value);
             }
         }
 
@@ -169,7 +236,7 @@ namespace Plateautem
         {
             get
             {
-                if (currentFuelItemIndex == -1) return stoneItemDisplayName;
+                if (currentFuelItemIndex < 0) return stoneItemDisplayName;
 
                 if (fuelItems == null || fuelItems.Count == 0) return "";
 
@@ -177,23 +244,28 @@ namespace Plateautem
             }
         }
 
-        private string GetFuelItemDisplayName(int index)
+        private string CurrentLowerToolName
         {
-            if (index == -1) return stoneItemDisplayName;
-
-            var fuelItem = fuelItems[index];
-            if (fuelItem.displayName == null)
+            get
             {
-                var fuelItemPrefab = ObjectDB.instance.GetItemPrefab(fuelItem.prefabName);
-                var fuelItemDrop = fuelItemPrefab?.GetComponent<ItemDrop>();
-                if (fuelItemDrop != null)
-                {
-                    fuelItem.displayName = fuelItemDrop.m_itemData.m_shared.m_name;
-                    fuelItems[index] = fuelItem;
-                }
+                if (currentLowerToolIndex < 0) return "";
+                return lowerToolDisplayNames[currentLowerToolIndex];
             }
+        }
 
-            return fuelItem.displayName;
+        private string CurrentRaiseToolName
+        {
+            get
+            {
+                if (currentRaiseToolIndex < 0) return "";
+                return raiseToolDisplayNames[currentRaiseToolIndex];
+            }
+        }
+
+        private static CustomRPC rpcLevelTerrain;
+        public static void RegisterRPCs()
+        {
+            rpcLevelTerrain = NetworkManager.Instance.AddRPC("LevelTerrain", RPCS_LevelTerrain, null);
         }
 
         public static void LoadConfig(BaseUnityPlugin plugin)
@@ -208,14 +280,38 @@ namespace Plateautem
             configMaximumStone = plugin.Config.Bind("Server", "Maximum Stone", defaultValue: 250, new ConfigDescription("Maximum amount of stone stored in the totem.", new AcceptableValueRange<int>(1, 10000), new ConfigurationManagerAttributes { IsAdminOnly = true }));
             configDefaultFlatteningRadius = plugin.Config.Bind("Server", "Default Flattening Radius", defaultValue: 10.0f, new ConfigDescription("Default radius of the area to be flattened.", new AcceptableValueRange<float>(2.0f, 100.0f), new ConfigurationManagerAttributes { IsAdminOnly = true }));
             configMaximumFlatteningRadius = plugin.Config.Bind("Server", "Maximum Flattening Radius", defaultValue: 40.0f, new ConfigDescription("Maximum radius of the area to be flattened.", new AcceptableValueRange<float>(2.0f, 100.0f), new ConfigurationManagerAttributes { IsAdminOnly = true }));
-            configFlatteningTime = plugin.Config.Bind("Server", "Flattening Time", defaultValue: 1.0f, new ConfigDescription("Time taken for a flattening action.", new AcceptableValueRange<float>(0.1f, 60.0f), new ConfigurationManagerAttributes { IsAdminOnly = true }));
+            configMinFlatteningTime = plugin.Config.Bind("Server", "Min Flattening Time", defaultValue: 0.2f, new ConfigDescription("Time taken for a flattening action with maximum bonus.", new AcceptableValueRange<float>(0.1f, 60.0f), new ConfigurationManagerAttributes { IsAdminOnly = true }));
+            configMaxFlatteningTime = plugin.Config.Bind("Server", "Max Flattening Time", defaultValue: 1.0f, new ConfigDescription("Time taken for a flattening action with no bonus.", new AcceptableValueRange<float>(0.1f, 60.0f), new ConfigurationManagerAttributes { IsAdminOnly = true }));
             configScanningTime = plugin.Config.Bind("Server", "Scanning Time", defaultValue: 0.2f, new ConfigDescription("Time taken for a scanning action.", new AcceptableValueRange<float>(0.1f, 60.0f), new ConfigurationManagerAttributes { IsAdminOnly = true }));
+            configDoPainting = plugin.Config.Bind("Server", "Do Painting", defaultValue: true, new ConfigDescription("Paint dirt onto terrain.", null, new ConfigurationManagerAttributes { IsAdminOnly = true }));
+            configRequireLowerTool = plugin.Config.Bind("Server", "Require Lower Tool", defaultValue: true, new ConfigDescription("Require pickaxe to lower terrain.", null, new ConfigurationManagerAttributes { IsAdminOnly = true }));
+            configRequireRaiseTool = plugin.Config.Bind("Server", "Require Raise Tool", defaultValue: true, new ConfigDescription("Require hoe to raise terrain.", null, new ConfigurationManagerAttributes { IsAdminOnly = true }));
+
+            configLowerToolBonus = new ConfigEntry<float>[lowerToolPrefabNames.Length];
+            for (int i = 0; i < lowerToolPrefabNames.Length; i++)
+            {
+                configLowerToolBonus[i] = plugin.Config.Bind("Server", $"{lowerToolPrefabNames[i]} Bonus", defaultValue: i/(float)(lowerToolPrefabNames.Length > 1 ? lowerToolPrefabNames.Length - 1 : 1), new ConfigDescription($"Bonus applied for {lowerToolPrefabNames[i]}. 0 = Max Flattening Time. 1 = Min Flattening Time.", new AcceptableValueRange<float>(0.0f, 1.0f), new ConfigurationManagerAttributes { IsAdminOnly = true }));
+            }
+
+            configRaiseToolBonus = new ConfigEntry<float>[raiseToolPrefabNames.Length];
+            for (int i = 0; i < raiseToolPrefabNames.Length; i++)
+            {
+                configRaiseToolBonus[i] = plugin.Config.Bind("Server", $"{raiseToolPrefabNames[i]} Bonus", defaultValue: i / (float)(raiseToolPrefabNames.Length > 1 ? lowerToolPrefabNames.Length - 1 : 1), new ConfigDescription($"Bonus applied for {raiseToolPrefabNames[i]}. 0 = Max Flattening Time. 1 = Min Flattening Time.", new AcceptableValueRange<float>(0.0f, 1.0f), new ConfigurationManagerAttributes { IsAdminOnly = true }));
+            }
 
             configIncreaseRadiusKey = plugin.Config.Bind("Input", "Increase flattening radius", new KeyboardShortcut(KeyCode.KeypadPlus));
             configDecreaseRadiusKey = plugin.Config.Bind("Input", "Decrease flattening radius", new KeyboardShortcut(KeyCode.KeypadMinus));
             configResetScanKey = plugin.Config.Bind("Input", "Reset scan position", new KeyboardShortcut(KeyCode.KeypadEnter));
             configEjectFuelKey = plugin.Config.Bind("Input", "Eject fuel", new KeyboardShortcut(KeyCode.KeypadDivide));
             configEjectStoneKey = plugin.Config.Bind("Input", "Eject stone", new KeyboardShortcut(KeyCode.KeypadMultiply));
+            configEjectToolsKey = plugin.Config.Bind("Input", "Eject tools", new KeyboardShortcut(KeyCode.KeypadPeriod));
+
+            configShowMainKeys = plugin.Config.Bind("Client", "Show Main Keys", defaultValue: true, new ConfigDescription("Show main keys in hover text.", null, new ConfigurationManagerAttributes { IsAdminOnly = false }));
+            configShowExtraKeys = plugin.Config.Bind("Client", "Show Extra Keys", defaultValue: true, new ConfigDescription("Show extra keys in hover text.", null, new ConfigurationManagerAttributes { IsAdminOnly = false }));
+            configShowFillBars = plugin.Config.Bind("Client", "Show Fill Bars", defaultValue: true, new ConfigDescription("Show fill bars in hover text.", null, new ConfigurationManagerAttributes { IsAdminOnly = false }));
+            configShowFillNumbers = plugin.Config.Bind("Client", "Show Fill Numbers", defaultValue: true, new ConfigDescription("Show fill numbers in hover text.", null, new ConfigurationManagerAttributes { IsAdminOnly = false }));
+            configShowTools = plugin.Config.Bind("Client", "Show Tools", defaultValue: true, new ConfigDescription("Show tools in hover text.", null, new ConfigurationManagerAttributes { IsAdminOnly = false }));
+            configShowSelection = plugin.Config.Bind("Client", "Show Selection", defaultValue: true, new ConfigDescription("Show selection in hover text.", null, new ConfigurationManagerAttributes { IsAdminOnly = false }));
 
             configDefaultFlatteningRadius.SettingChanged += OnConfigChanged;
             configMaximumFlatteningRadius.SettingChanged += OnConfigChanged;
@@ -241,17 +337,14 @@ namespace Plateautem
 
             var fuelItemRegex = new Regex(@"\s*([^=,\s]+)(?:\s*\=\s*(\d+(?:\.\d+)?))?\s*(?:,|$)");
             var fuelItemMatches = fuelItemRegex.Matches(configFuelItems.Value);
-            Jotunn.Logger.LogInfo($"configFuelItems.Value: {configFuelItems.Value} {fuelItemMatches.Count}");
             if (fuelItemMatches.Count > 0)
             {
                 for (int i = 0; i < fuelItemMatches.Count; ++i)
                 {
                     var match = fuelItemMatches[i];
-                    Jotunn.Logger.LogInfo($"match.Groups.Count: {match.Groups.Count}");
                     if (match.Groups.Count >= 2)
                     {
                         string fuelItemPrefabName = match.Groups[1].Value;
-                        Jotunn.Logger.LogInfo($"fuelItemPrefabName: {fuelItemPrefabName}");
                         float fuelItemValue = 1.0f;
                         if (match.Groups.Count >= 3 && !string.IsNullOrWhiteSpace(match.Groups[2].Value))
                         {
@@ -286,61 +379,70 @@ namespace Plateautem
             zdoidCurrentRadius = zdonCurrentRadius.GetStableHashCode();
             zdoidFuelStored = zdonFuelStored.GetStableHashCode();
             zdoidStoneStored = zdonStoneStored.GetStableHashCode();
-            zdoidScanRadius = zdonScanRadius.GetStableHashCode();
-            zdoidScanAngle = zdonScanAngle.GetStableHashCode();
+            zdoidScanProgress = zdonScanProgress.GetStableHashCode();
+            zdoidScanIndex = zdonScanIndex.GetStableHashCode();
+            zdoidScanSpeed = zdonScanSpeed.GetStableHashCode();
+            zdoidLowerToolIndex = zdonLowerToolIndex.GetStableHashCode();
+            zdoidRaiseToolIndex = zdonRaiseToolIndex.GetStableHashCode();
 
-            if (flattenTerrainOp == null)
+            if (flattenTerrainOp == null || !flattenTerrainOp)
             {
-                TerrainOp raiseTerrainOp = null;
-                var pieceTable = PieceManager.Instance.GetPieceTable("_HoePieceTable");
-                foreach (var piece in pieceTable.m_pieces)
+                var flattenGO = PrefabManager.Instance.GetPrefab("plateautem_flatten_op");
+                if (flattenGO == null)
                 {
-                    if (piece != null && piece.name.Contains("raise"))
-                    {
-                        raiseTerrainOp = piece.GetComponent<TerrainOp>();
-                        if (raiseTerrainOp != null)
-                        {
-                            Jotunn.Logger.LogInfo("Found raise TerrainOp.");
+                    flattenGO = PrefabManager.Instance.CreateClonedPrefab("plateautem_flatten_op", "mud_road_v2");
+                    flattenTerrainOp = flattenGO.GetComponent<TerrainOp>();
 
-                            var flattenGO = PrefabManager.Instance.CreateClonedPrefab("plateautem_flatten_op", raiseTerrainOp.gameObject);
-                            flattenTerrainOp = flattenGO.GetComponent<TerrainOp>();
+                    flattenTerrainOp.m_settings.m_levelOffset = 0.0f;
 
-                            flattenTerrainOp.m_settings.m_levelOffset = 0.0f;
+                    flattenTerrainOp.m_settings.m_level = true;
+                    flattenTerrainOp.m_settings.m_levelRadius = 4.0f;
+                    flattenTerrainOp.m_settings.m_square = false;
 
-                            flattenTerrainOp.m_settings.m_level = true;
-                            flattenTerrainOp.m_settings.m_levelRadius = 2.5f;
-                            flattenTerrainOp.m_settings.m_square = false;
+                    flattenTerrainOp.m_settings.m_raise = false;
+                    flattenTerrainOp.m_settings.m_raiseRadius = 3.0f;
+                    flattenTerrainOp.m_settings.m_raisePower = 3.0f;
+                    flattenTerrainOp.m_settings.m_raiseDelta = 0.0f;
 
-                            flattenTerrainOp.m_settings.m_raise = false;
-                            flattenTerrainOp.m_settings.m_raiseRadius = 2.5f;
-                            flattenTerrainOp.m_settings.m_raisePower = 10.0f;
-                            flattenTerrainOp.m_settings.m_raiseDelta = 0.0f;
+                    flattenTerrainOp.m_settings.m_smooth = false;
+                    flattenTerrainOp.m_settings.m_smoothRadius = 3.0f;
+                    flattenTerrainOp.m_settings.m_smoothPower = 3.0f;
 
-                            flattenTerrainOp.m_settings.m_smooth = false;
-                            flattenTerrainOp.m_settings.m_smoothRadius = 3.0f;
-                            flattenTerrainOp.m_settings.m_smoothPower = 3.0f;
-
-                            flattenTerrainOp.m_settings.m_paintCleared = true;
-                            flattenTerrainOp.m_settings.m_paintHeightCheck = false;
-                            flattenTerrainOp.m_settings.m_paintType = TerrainModifier.PaintType.Dirt;
-                            flattenTerrainOp.m_settings.m_paintRadius = 2f;
-
-                            flattenPlaceEffect = flattenGO.GetComponent<Piece>()?.m_placeEffect;
-
-                            break;
-                        }
-                    }
+                    flattenTerrainOp.m_settings.m_paintCleared = configDoPainting.Value;
+                    flattenTerrainOp.m_settings.m_paintHeightCheck = false;
+                    flattenTerrainOp.m_settings.m_paintType = TerrainModifier.PaintType.Dirt;
+                    flattenTerrainOp.m_settings.m_paintRadius = 2.5f;
+                }
+                else
+                {
+                    flattenTerrainOp = flattenGO.GetComponent<TerrainOp>();
                 }
             }
+
+            flattenPlaceEffect = new EffectList
+            {
+                m_effectPrefabs = new EffectList.EffectData[]
+                {
+                    new EffectList.EffectData { m_prefab = PrefabManager.Instance.GetPrefab("vfx_Place_mud_road") },
+                    new EffectList.EffectData { m_prefab = PrefabManager.Instance.GetPrefab("sfx_build_hoe") },
+                }
+            };
 
             WearNTear wearNTear = GetComponent<WearNTear>();
             wearNTear.m_onDestroyed = (System.Action)System.Delegate.Combine(wearNTear.m_onDestroyed, new System.Action(OnDestroyed));
 
-            netView.Register<float>("SetCurrentRadius", RPC_SetCurrentRadius);
-
-            Invoke("AttemptLevelling", configScanningTime.Value);
-
-            currentLightPosition = targetLightPosition = transform.position + Vector3.up * 1.5f;
+            if (netView != null)
+            {
+                netView.Register<int, int>("AddFuelItem", RPC_AddFuelItem);
+                netView.Register<ZPackage>("AddLowerTool", RPC_AddLowerTool);
+                netView.Register<ZPackage>("AddRaiseTool", RPC_AddRaiseTool);
+                netView.Register<int>("AddStone", RPC_AddStone);
+                netView.Register<float>("ChangeRadius", RPC_ChangeRadius);
+                netView.Register("ResetScan", RPC_ResetScan);
+                netView.Register("EjectFuel", RPC_EjectFuel);
+                netView.Register("EjectStone", RPC_EjectStone);
+                netView.Register("EjectTools", RPC_EjectTools);
+            }
 
             UpdateCircle(currentRadius);
         }
@@ -349,17 +451,275 @@ namespace Plateautem
         {
             EjectFuel(false);
             EjectStone(false);
+            EjectTools(true, true);
+        }
 
-            CancelInvoke("AttemptLevelling");
+        public void RPC_AddFuelItem(long sender, int fuelItemIndex, int fuelItemsToAdd)
+        {
+            if (!netView.IsOwner()) return;
+
+            SetFuelItemStorage(fuelItemIndex, GetFuelItemStorage(fuelItemIndex) + fuelItemsToAdd);
+        }
+
+        public void RPC_AddLowerTool(long sender, ZPackage package)
+        {
+            if (!netView.IsOwner()) return;
+
+            EjectTools(true, false);
+
+            currentLowerToolIndex = package.ReadInt();
+            ReadItemToZDO(1, package, netView.GetZDO());
+        }
+
+        public void RPC_AddRaiseTool(long sender, ZPackage package)
+        {
+            if (!netView.IsOwner()) return;
+
+            EjectTools(false, true);
+
+            currentRaiseToolIndex = package.ReadInt();
+            ReadItemToZDO(2, package, netView.GetZDO());
+        }
+
+        public void RPC_AddStone(long sender, int stoneToAdd)
+        {
+            if (!netView.IsOwner()) return;
+
+            currentStoneStored += stoneToAdd;
+        }
+
+        public void RPC_ChangeRadius(long sender, float delta)
+        {
+            if (!netView.IsOwner()) return;
+
+            currentRadius = Mathf.Clamp(currentRadius + delta, 1.0f, configMaximumFlatteningRadius.Value);
+        }
+
+        public void RPC_ResetScan(long sender)
+        {
+            if (!netView.IsOwner()) return;
+
+            currentScanProgress = 0.0f;
+            currentScanIndex = 0;
+            currentScanSpeed = 1.0f / configScanningTime.Value;
+        }
+
+        public void RPC_EjectFuel(long sender)
+        {
+            if (!netView.IsOwner()) return;
+
+            EjectFuel(true);
+        }
+
+        public void RPC_EjectStone(long sender)
+        {
+            if (!netView.IsOwner()) return;
+
+            EjectStone(true);
+        }
+
+        public void RPC_EjectTools(long sender)
+        {
+            if (!netView.IsOwner()) return;
+
+            EjectTools(true, true);
+        }
+
+        private static IEnumerator RPCS_LevelTerrain(long sender, ZPackage package)
+        {
+            var position = package.ReadVector3();
+
+            while (true)
+            {
+                var zoneLoaded = false;
+                var zoneId = ZoneSystem.instance.GetZone(position);
+                for (int y = zoneId.y - 1; y <= zoneId.y + 1; y++)
+                {
+                    for (int x = zoneId.x - 1; x <= zoneId.x + 1; x++)
+                    {
+                        if (ZoneSystem.instance.PokeLocalZone(zoneId))
+                        {
+                            zoneLoaded = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!zoneLoaded)
+                {
+                    Instantiate(flattenTerrainOp.gameObject, position, Quaternion.identity);
+                    yield break;
+                }
+
+                yield return null;
+            }
         }
 
         private void Update()
         {
-            currentLightPosition = Vector3.MoveTowards(currentLightPosition, targetLightPosition, lightSpeed * Time.deltaTime);
+            if (!netView || !netView.IsValid()) return;
 
-            if (lightTransform != null) lightTransform.position = currentLightPosition;
-            if (flareTransform != null) flareTransform.position = currentLightPosition;
-            if (droneAudioSourceTransform != null) droneAudioSourceTransform.position = currentLightPosition;
+            UpdateCircle(currentRadius);
+
+            if (!netView.IsOwner())
+            {
+                UpdateOrb(false);
+                return;
+            }
+
+            bool doLower = !configRequireLowerTool.Value || currentLowerToolIndex >= 0;
+            bool doRaise = !configRequireRaiseTool.Value || currentRaiseToolIndex >= 0;
+            if (doLower || doRaise)
+            {
+                int scanPointCount = CountPointsInSpiral(currentRadius + placementSpacing, placementSpacing);
+                if (currentScanProgress > scanPointCount)
+                {
+                    currentScanProgress = 0.0f;
+                    currentScanIndex = 0;
+                    currentScanSpeed = 1.0f / configScanningTime.Value;
+                }
+
+                if (currentScanProgress >= currentScanIndex)
+                {
+                    float scanAngle, scanRadius;
+                    PolarPointOnSpiral(currentScanProgress, placementSpacing, out scanAngle, out scanRadius);
+                    var radius = Mathf.Min(scanRadius, currentRadius);
+                    var scanOffset = new Vector3(Mathf.Sin(scanAngle) * radius, 0.0f, Mathf.Cos(scanAngle) * radius);
+                    var scanPosition = transform.position + scanOffset;
+                    float totalRaise = 0.0f;
+                    float totalLower = 0.0f;
+                    float fuelRequired = 0.0f;
+                    float stoneRequired = 0.0f;
+                    float triggerVolume = 0.0f;
+                    if (!IsInsideNoBuildLocation(scanPosition, 4.0f) && IsInLoadedArea(scanPosition, 5.0f))
+                    {
+                        const float sampleSpacing = 0.5f;
+                        const float sampleSpacingSqr = sampleSpacing * sampleSpacing;
+                        const float cefgw = 0.1f;
+                        foreach (var groundPoint in EachGroundPointOnSpiral(scanPosition, 2.0f, sampleSpacing))
+                        {
+                            if (groundPoint.y > scanPosition.y + cefgw)
+                            {
+                                var volume = (groundPoint.y - scanPosition.y) * sampleSpacingSqr;
+                                totalLower += volume;
+                                fuelRequired += volume * configFuelPerLower.Value;
+                                stoneRequired -= volume * configStonePerLower.Value;
+                                triggerVolume += volume * Mathf.Pow(Mathf.Clamp01(1.0f - groundPoint.w / 2.0f), 0.3f);
+                            }
+                            else if (groundPoint.y < scanPosition.y - cefgw)
+                            {
+                                float volume = (scanPosition.y - groundPoint.y) * sampleSpacingSqr;
+                                totalRaise += volume;
+                                fuelRequired += volume * configFuelPerRaise.Value;
+                                stoneRequired += volume * configStonePerRaise.Value;
+                                triggerVolume += volume * Mathf.Pow(Mathf.Clamp01(1.0f - groundPoint.w / 2.0f), 0.3f);
+                            }
+                        }
+                    }
+
+                    float difference = totalRaise - totalLower;
+                    bool doFlatten = triggerVolume > 0.75f && (doLower || difference > 0) && (doRaise || difference < 0);
+                    if (doFlatten && stoneRequired > 0 && currentStoneStored < stoneRequired) doFlatten = false;
+                    if (doFlatten && stoneRequired < 0 && (configMaximumStone.Value - currentStoneStored) < -stoneRequired) doFlatten = false;
+
+                    float nextScanSpeed = 1.0f / configScanningTime.Value;
+                    if (doFlatten)
+                    {
+                        fuelRequired += configFuelPerScan.Value;
+                    }
+                    else
+                    {
+                        fuelRequired = configFuelPerScan.Value;
+                        stoneRequired = 0.0f;
+                    }
+
+                    bool freeby = triggerVolume < 0.1f;
+                    var fuelStored = GetTotalFuelStored();
+                    if (fuelStored >= fuelRequired)
+                    {
+                        ConsumeFuel(fuelRequired);
+                        currentStoneStored -= stoneRequired;
+
+                        if (doFlatten)
+                        {
+                            float bonus = 0.0f;
+                            if (difference < 0.0f && currentLowerToolIndex >= 0)
+                            {
+                                bonus = configLowerToolBonus[currentLowerToolIndex].Value;
+                            }
+                            else if (difference > 0.0f && currentRaiseToolIndex >= 0)
+                            {
+                                bonus = configRaiseToolBonus[currentRaiseToolIndex].Value;
+                            }
+                            nextScanSpeed = 1.0f / (freeby ? configScanningTime.Value : Mathf.Lerp(configMaxFlatteningTime.Value, configMinFlatteningTime.Value, bonus));
+
+                            Instantiate(flattenTerrainOp.gameObject, scanPosition, Quaternion.identity);
+
+                            if (!freeby) flattenPlaceEffect?.Create(scanPosition, Quaternion.identity, transform);
+                        }
+
+                        targetDroneAudioVolume = 1.0f;
+
+                        currentScanIndex++;
+
+                        if (currentScanIndex < scanPointCount)
+                        {
+                            currentScanProgress += Time.deltaTime * currentScanSpeed;
+                        }
+                        else
+                        {
+                            currentScanIndex = 0;
+                            currentScanProgress = 0.0f;
+                        }
+                    }
+                    else
+                    {
+                        targetDroneAudioVolume = 0.0f;
+                    }
+
+                    currentScanSpeed = nextScanSpeed;
+                }
+                else
+                {
+                    currentScanProgress += Time.deltaTime * currentScanSpeed;
+                }
+            }
+
+            UpdateOrb(true);
+        }
+
+        private void UpdateOrb(bool isOwner)
+        {
+            float scanProgress = currentScanProgress;
+            if (!isOwner)
+            {
+                if (previousScanTime == 0.0f) previousScanTime = Time.time;
+                if (scanProgress > targetScanProgress)
+                {
+                    previousScanTime2 = previousScanTime;
+                    previousScanTime = Time.time;
+                    previousScanProgress = targetScanProgress;
+                    targetScanProgress = scanProgress;
+                }
+                else if (scanProgress < previousScanProgress)
+                {
+                    previousScanTime2 = previousScanTime;
+                    previousScanTime = Time.time;
+                    targetScanProgress = previousScanProgress = scanProgress;
+                }
+                var scanSpeed = (targetScanProgress - previousScanProgress) / Mathf.Max(0.001f, previousScanTime - previousScanTime2);
+                scanProgress = Mathf.Lerp(previousScanProgress, targetScanProgress, Mathf.Clamp01((Time.time - previousScanTime) * scanSpeed));
+            }
+
+            float orbAngle, orbRadius;
+            PolarPointOnSpiral(scanProgress, placementSpacing, out orbAngle, out orbRadius);
+            orbRadius = Mathf.Min(orbRadius, currentRadius);
+            var orbOffset = new Vector3(Mathf.Sin(orbAngle) * orbRadius, 0.5f, Mathf.Cos(orbAngle) * orbRadius);
+            var orbPosition = transform.position + orbOffset;
+
+            if (lightTransform != null) lightTransform.position = orbPosition;
+            if (flareTransform != null) flareTransform.position = orbPosition;
+            if (droneAudioSourceTransform != null) droneAudioSourceTransform.position = orbPosition;
 
             if (droneAudioSource != null)
             {
@@ -367,136 +727,77 @@ namespace Plateautem
                 {
                     droneAudioSource.gameObject.SetActive(true);
                     droneAudioSource.enabled = true;
+                    droneAudioSource.loop = true;
                     droneAudioSource.Play();
                 }
                 droneAudioSource.volume = Mathf.MoveTowards(droneAudioSource.volume, targetDroneAudioVolume, Time.deltaTime);
             }
         }
 
-        private void AttemptLevelling()
+        private string GetFuelItemDisplayName(int index)
         {
-            if (!netView || !netView.IsOwner() || !netView.IsValid() || Player.m_localPlayer == null)
-            {
-                Invoke("AttemptLevelling", 5.0f);
-                return;
-            }
+            if (index == -1) return stoneItemDisplayName;
 
-            if (flattenTerrainOp == null)
+            var fuelItem = fuelItems[index];
+            if (fuelItem.displayName == null)
             {
-                Invoke("AttemptLevelling", 5.0f);
-                return;
-            }
-
-            UpdateCircle(currentRadius);
-
-            if (currentScanRadius > currentRadius + placementSpacing)
-            {
-                currentScanRadius = 0.0f;
-                currentScanAngle = 0.0f;
-            }
-
-            var radius = Mathf.Min(currentScanRadius, currentRadius);
-            var offset = new Vector3(Mathf.Sin(currentScanAngle) * radius, 0.0f, Mathf.Cos(currentScanAngle) * radius);
-            var position = transform.position + offset;
-            float totalRaise = 0.0f;
-            float totalLower = 0.0f;
-            float fuelRequired = 0.0f;
-            float stoneRequired = 0.0f;
-            float triggerVolume = 0.0f;
-            const float sampleSpacing = 0.5f;
-            const float sampleSpacingSqr = sampleSpacing * sampleSpacing;
-            const float cefgw = 0.1f;
-            foreach (var groundPoint in EachGroundPointInSpiral(position, 2.0f, sampleSpacing))
-            {
-                if (groundPoint.y > position.y + cefgw)
+                var fuelItemPrefab = ObjectDB.instance.GetItemPrefab(fuelItem.prefabName);
+                var fuelItemDrop = fuelItemPrefab?.GetComponent<ItemDrop>();
+                if (fuelItemDrop != null)
                 {
-                    var volume = (groundPoint.y - position.y) * sampleSpacingSqr;
-                    totalRaise += volume;
-                    fuelRequired += volume * configFuelPerLower.Value;
-                    stoneRequired -= volume * configStonePerLower.Value;
-                    triggerVolume += volume * Mathf.Pow(Mathf.Clamp01(1.0f - groundPoint.w / 2.0f), 0.3f);
-                }
-                else if (groundPoint.y < position.y - cefgw)
-                {
-                    float volume = (position.y - groundPoint.y) * sampleSpacingSqr;
-                    totalLower += volume;
-                    fuelRequired += volume * configFuelPerRaise.Value;
-                    stoneRequired += volume * configStonePerRaise.Value;
-                    triggerVolume += volume * Mathf.Pow(Mathf.Clamp01(1.0f - groundPoint.w / 2.0f), 0.3f);
+                    fuelItem.displayName = fuelItemDrop.m_itemData.m_shared.m_name;
+                    fuelItems[index] = fuelItem;
                 }
             }
 
-            bool doFlatten = triggerVolume > 0.35f;
-            if (doFlatten && stoneRequired > 0 && currentStoneStored < stoneRequired) doFlatten = false;
-            if (doFlatten && stoneRequired < 0 && (configMaximumStone.Value - currentStoneStored) < -stoneRequired) doFlatten = false;
-
-            float nextUpdateDelay = configScanningTime.Value;
-            if (doFlatten)
-            {
-                fuelRequired += configFuelPerScan.Value;
-            }
-            else
-            {
-                fuelRequired = configFuelPerScan.Value;
-                stoneRequired = 0.0f;
-            }
-
-            var fuelStored = GetTotalFuelStored();
-            if (fuelStored >= fuelRequired)
-            {
-                ConsumeFuel(fuelRequired);
-                currentStoneStored -= stoneRequired;
-
-                if (doFlatten)
-                {
-                    nextUpdateDelay = configFlatteningTime.Value;
-                    var terrainOpGO = Instantiate(flattenTerrainOp.gameObject, position, Quaternion.identity);
-                    flattenPlaceEffect?.Create(position, Quaternion.identity, terrainOpGO.transform);
-                }
-
-                currentScanAngle += (currentScanRadius > 0.0f) ? placementSpacing / currentScanRadius : placementSpacing;
-                currentScanRadius = placementRadiusScale * currentScanAngle;
-
-                if (currentScanRadius > currentRadius + placementSpacing)
-                {
-                    targetLightPosition = transform.position + Vector3.up * 0.5f;
-                }
-                else
-                {
-                    var targetRadius = Mathf.Min(currentScanRadius, currentRadius);
-                    var targetOffset = new Vector3(Mathf.Sin(currentScanAngle) * targetRadius, 0.5f, Mathf.Cos(currentScanAngle) * targetRadius);
-                    targetLightPosition = transform.position + targetOffset;
-                }
-
-                lightSpeed = Vector3.Distance(currentLightPosition, targetLightPosition) / nextUpdateDelay;
-                targetDroneAudioVolume = 1.0f;
-            }
-            else
-            {
-                targetDroneAudioVolume = 0.0f;
-            }
-
-            Invoke("AttemptLevelling", nextUpdateDelay);
+            return fuelItem.displayName;
         }
 
-        private IEnumerable<Vector4> EachGroundPointInSpiral(Vector3 origin, float radius, float sampleSpacing = 0.5f)
+        private static IEnumerable<Vector4> EachGroundPointOnSpiral(Vector3 origin, float radius, float sampleSpacing = 0.5f)
         {
-            float sampleScale = sampleSpacing / (2.0f * Mathf.PI);
-            float sampleAngle = 0.0f;
-            float sampleRadius = 0.0f;
             float sampleHeight;
-            while (sampleRadius < radius)
+            foreach (var offset in EachPointOnSpiral(radius, sampleSpacing))
             {
-                var sampleOffset = new Vector3(Mathf.Sin(sampleAngle) * sampleRadius, 0.0f, Mathf.Cos(sampleAngle) * sampleRadius);
-                var samplePosition = origin + sampleOffset;
+                var samplePosition = new Vector3(origin.x + offset.x, origin.y, origin.z + offset.y);
                 if (ZoneSystem.instance.GetGroundHeight(samplePosition, out sampleHeight))
                 {
-                    yield return new Vector4(samplePosition.x, sampleHeight, samplePosition.z, sampleRadius);
+                    yield return new Vector4(samplePosition.x, sampleHeight, samplePosition.z, offset.w);
                 }
-
-                sampleAngle += (sampleRadius > 0.0f) ? sampleSpacing / sampleRadius : sampleSpacing;
-                sampleRadius = sampleScale * sampleAngle;
             }
+        }
+
+        public static IEnumerable<Vector4> EachPointOnSpiral(float radius, float sampleSpacing)
+        {
+            float sampleAngle, sampleRadius;
+            int count = CountPointsInSpiral(radius, sampleSpacing);
+            for (int i = 0; i < count; i++)
+            {
+                PolarPointOnSpiral(i, sampleSpacing, out sampleAngle, out sampleRadius);
+                yield return new Vector4(Mathf.Sin(sampleAngle) * sampleRadius, Mathf.Cos(sampleAngle) * sampleRadius, sampleAngle, sampleRadius);
+            }
+        }
+
+        public static IEnumerable<Vector2> EachPointOnSpiralPolar(float radius, float sampleSpacing)
+        {
+            float sampleAngle, sampleRadius;
+            int count = CountPointsInSpiral(radius, sampleSpacing);
+            for (int i = 0; i < count; i++)
+            {
+                PolarPointOnSpiral(i, sampleSpacing, out sampleAngle, out sampleRadius);
+                yield return new Vector2(sampleAngle, sampleRadius);
+            }
+        }
+
+        public static void PolarPointOnSpiral(float t, float spacing, out float angle, out float radius)
+        {
+            angle = Mathf.Sqrt(t) * 3.542f;
+            radius = angle * spacing / (Mathf.PI * 2.0f);
+        }
+
+        public static int CountPointsInSpiral(float radius, float spacing)
+        {
+            var scaledRadius = radius / spacing;
+            return Mathf.CeilToInt(scaledRadius * scaledRadius * 3.146755f);
         }
 
         internal void BuildPrefab(PrivateArea privateArea, AssetBundle assetBundle)
@@ -533,7 +834,7 @@ namespace Plateautem
             light.intensity = 3.0f;
             light.range = 9.0f;
 
-            circleProjector.m_radius = currentRadius + 1.5f;
+            circleProjector.m_radius = currentRadius + circlePadding;
             circleProjector.m_nrOfSegments = Mathf.CeilToInt(circleProjector.m_radius * 4.0f);
 
             var flareGameObject = enabledEffect.transform.Find("flare").gameObject;
@@ -575,11 +876,49 @@ namespace Plateautem
             
             if (item == null) return false;
 
+            var itemDisplayName = item.m_shared.m_name;
+
             for (int fuelItemIndex = -1; fuelItemIndex < fuelItems.Count; fuelItemIndex++)
             {
-                if (item.m_shared.m_name == GetFuelItemDisplayName(fuelItemIndex))
+                if (itemDisplayName == GetFuelItemDisplayName(fuelItemIndex))
                 {
                     currentFuelItemIndex = fuelItemIndex;
+                    user.Message(MessageHud.MessageType.Center, Localization.instance.Localize(msgSelectMode, itemDisplayName));
+                    return true;
+                }
+            }
+
+            var inventory = user.GetInventory();
+            if (inventory == null) return false;
+
+            for (int lowerToolIndex = 0; lowerToolIndex < lowerToolDisplayNames.Length; lowerToolIndex++)
+            {
+                if (itemDisplayName == lowerToolDisplayNames[lowerToolIndex])
+                {
+                    var package = new ZPackage();
+                    package.Write(lowerToolIndex);
+                    WriteItem(package, item);
+                    netView.InvokeRPC("AddLowerTool", package);
+
+                    user.UnequipItem(item);
+                    inventory.RemoveOneItem(item);
+
+                    return true;
+                }
+            }
+
+            for (int raiseToolIndex = 0; raiseToolIndex < raiseToolDisplayNames.Length; raiseToolIndex++)
+            {
+                if (itemDisplayName == raiseToolDisplayNames[raiseToolIndex])
+                {
+                    var package = new ZPackage();
+                    package.Write(raiseToolIndex);
+                    WriteItem(package, item);
+                    netView.InvokeRPC("AddRaiseTool", package);
+
+                    user.UnequipItem(item);
+                    inventory.RemoveOneItem(item);
+
                     return true;
                 }
             }
@@ -594,53 +933,134 @@ namespace Plateautem
             var totalFuelStored = GetTotalFuelStored();
 
             var stringBuilder = new StringBuilder();
-            stringBuilder.Append($"[{TextProgressBar(totalFuelStored / configMaximumFuel.Value, 12)}]\n");
-            stringBuilder.Append($"{msgFuel}: {totalFuelStored:0.0}/{configMaximumFuel.Value}\n");
-            stringBuilder.Append($"[<color=yellow><b>$KEY_Use</b></color>] $piece_smelter_add {CurrentFuelItemName}\n");
-            stringBuilder.Append($"[{msgHold} <color=yellow><b>$KEY_Use</b></color>] $piece_smelter_add {msgAll} {CurrentFuelItemName}\n");
-            stringBuilder.Append($"[<color=yellow><b>1-8</b></color>] {msgSelectFuel}\n");
+            if (configShowTools.Value) stringBuilder.Append($"{msgTools}: {GetToolNamesText(" + ")}\n");
+            if (configShowFillBars.Value) stringBuilder.Append($"[<color=orange>{TextProgressBar(totalFuelStored / configMaximumFuel.Value, 12)}</color>]\n");
+            if (configShowFillNumbers.Value) stringBuilder.Append($"{msgFuel}: {totalFuelStored:0.0}/{configMaximumFuel.Value}\n");
+            if (configShowFillBars.Value) stringBuilder.Append($"[<color=grey>{TextProgressBar(currentStoneStored / configMaximumStone.Value, 12)}</color>]\n");
+            if (configShowFillNumbers.Value) stringBuilder.Append($"{stoneItemDisplayName}: {currentStoneStored:0.0}/{configMaximumStone.Value}\n");
 
-            stringBuilder.Append($" {(currentFuelItemIndex == -1 ? '●' : '○')} {stoneItemDisplayName}: {currentStoneStored:0.0}\n");
-            if (fuelItems != null)
+            if (configShowSelection.Value)
             {
-                for (int fuelItemIndex = 0; fuelItemIndex < fuelItems.Count; fuelItemIndex++)
+                stringBuilder.Append($" {(currentFuelItemIndex == -1 ? '●' : '○')} {stoneItemDisplayName}: {Mathf.FloorToInt(currentStoneStored)}\n");
+                if (fuelItems != null)
                 {
-                    stringBuilder.Append($" {(currentFuelItemIndex == fuelItemIndex ? '●' : '○')} {GetFuelItemDisplayName(fuelItemIndex)}: {GetFuelItemStorage(fuelItemIndex)}\n");
+                    for (int fuelItemIndex = 0; fuelItemIndex < fuelItems.Count; fuelItemIndex++)
+                    {
+                        stringBuilder.Append($" {(currentFuelItemIndex == fuelItemIndex ? '●' : '○')} {GetFuelItemDisplayName(fuelItemIndex)}: {GetFuelItemStorage(fuelItemIndex)}\n");
+                    }
                 }
             }
 
-            stringBuilder.Append($"[<color=yellow>{configIncreaseRadiusKey.Value}</color>/<color=yellow>{configDecreaseRadiusKey.Value}</color>] {msgRadius}: {Mathf.RoundToInt(currentRadius)}\n");
-            stringBuilder.Append($"[<color=yellow>{configEjectFuelKey.Value}</color>] {msgEjectFuel}\n");
-            stringBuilder.Append($"[<color=yellow>{configEjectStoneKey.Value}</color>] {msgEjectStone}\n");
-            stringBuilder.Append($"[<color=yellow>{configResetScanKey.Value}</color>] {msgResetScan}\n");
+            if (configShowMainKeys.Value)
+            {
+                stringBuilder.Append($"[<color=yellow><b>1-8</b></color>] {msgSelectFuel}\n");
+                stringBuilder.Append($"[<color=yellow><b>$KEY_Use</b></color>] $piece_smelter_add {CurrentFuelItemName}\n");
+                stringBuilder.Append($"[{msgHold} <color=yellow><b>$KEY_Use</b></color>] $piece_smelter_add {msgAll} {CurrentFuelItemName}\n");
+                stringBuilder.Append($"[<color=yellow>{configIncreaseRadiusKey.Value}</color>/<color=yellow>{configDecreaseRadiusKey.Value}</color>] {msgRadius}: {Mathf.RoundToInt(currentRadius)}\n");
+            }
+
+            if (configShowExtraKeys.Value)
+            {
+                stringBuilder.Append($"[<color=yellow>{configEjectFuelKey.Value}</color>] {msgEjectFuel}\n");
+                stringBuilder.Append($"[<color=yellow>{configEjectStoneKey.Value}</color>] {msgEjectStone}\n");
+
+                if (currentLowerToolIndex >= 0 || currentRaiseToolIndex >= 0)
+                {
+                    stringBuilder.Append($"[<color=yellow>{configEjectToolsKey.Value}</color>] {msgEject} {GetToolNamesText(" + ")}\n");
+                }
+
+                stringBuilder.Append($"[<color=yellow>{configResetScanKey.Value}</color>] {msgResetScan}\n");
+            }
 
             HoverUpdate();
 
             return Localization.instance.Localize(stringBuilder.ToString());
         }
 
+        private string GetToolNamesText(string separator)
+        {
+            if (currentLowerToolIndex >= 0)
+            {
+                if (currentRaiseToolIndex >= 0)
+                {
+                    return lowerToolDisplayNames[currentLowerToolIndex]+separator+raiseToolDisplayNames[currentRaiseToolIndex];
+                }
+                else
+                {
+                    return lowerToolDisplayNames[currentLowerToolIndex];
+                }
+            }
+            else if (currentRaiseToolIndex >= 0)
+            {
+                return raiseToolDisplayNames[currentRaiseToolIndex];
+            }
+
+            return "$piece_smelter_empty";
+        }
+
         private void HoverUpdate()
         {
             if (!netView || !netView.IsValid() || Player.m_localPlayer == null) return;
 
-            if (configIncreaseRadiusKey.Value.IsDown() && currentRadius + 1.0f <= 40.0f)
-            {
-                currentRadius += 1.0f;
-            }
+            if (configIncreaseRadiusKey.Value.IsDown()) netView.InvokeRPC("ChangeRadius", 1.0f);
+            if (configDecreaseRadiusKey.Value.IsDown()) netView.InvokeRPC("ChangeRadius", -1.0f);
+            if (configResetScanKey.Value.IsDown()) netView.InvokeRPC("ResetScan");
+            if (configEjectFuelKey.Value.IsDown()) netView.InvokeRPC("EjectFuel");
+            if (configEjectStoneKey.Value.IsDown()) netView.InvokeRPC("EjectStone");
+            if (configEjectToolsKey.Value.IsDown()) netView.InvokeRPC("EjectTools");
+        }
 
-            if (configDecreaseRadiusKey.Value.IsDown() && currentRadius - 1.0f > 1.0f)
+        private static void WriteItem(ZPackage package, ItemDrop.ItemData item)
+        {
+            package.Write(item.m_durability);
+            package.Write(item.m_stack);
+            package.Write(item.m_quality);
+            package.Write(item.m_variant);
+            package.Write(item.m_crafterID);
+            package.Write(item.m_crafterName);
+            package.Write(item.m_customData.Count);
+            foreach (var kv in item.m_customData)
             {
-                currentRadius -= 1.0f;
+                package.Write(kv.Key);
+                package.Write(kv.Value);
             }
+        }
 
-            if (configResetScanKey.Value.IsDown())
+        private static void ReadItem(ZPackage package, ItemDrop.ItemData item)
+        {
+            item.m_durability = package.ReadSingle();
+            item.m_stack = package.ReadInt();
+            item.m_quality = package.ReadInt();
+            item.m_variant = package.ReadInt();
+            item.m_crafterID = package.ReadLong();
+            item.m_crafterName = package.ReadString();
+            var customDataCount = package.ReadInt();
+            item.m_customData.Clear();
+            for (int i = 0; i < customDataCount; i++)
             {
-                currentScanAngle = 0.0f;
-                currentScanRadius = 0.0f;
+                var key = package.ReadString();
+                var value = package.ReadString();
+                item.m_customData[key] = value;
             }
+        }
 
-            if (configEjectFuelKey.Value.IsDown()) EjectFuel(true);
-            if (configEjectStoneKey.Value.IsDown()) EjectStone(true);
+        private static void ReadItemToZDO(int index, ZPackage package, ZDO zdo)
+        {
+            int dataCount;
+            string indexString = index.ToString();
+            zdo.Set(indexString + "_durability", package.ReadSingle());
+            zdo.Set(indexString + "_stack", package.ReadInt());
+            zdo.Set(indexString + "_quality", package.ReadInt());
+            zdo.Set(indexString + "_variant", package.ReadInt());
+            zdo.Set(indexString + "_crafterID", package.ReadLong());
+            zdo.Set(indexString + "_crafterName", package.ReadString());
+            zdo.Set(indexString + "_dataCount", dataCount = package.ReadInt());
+            int dataIndex = 0;
+            for (int i = 0; i < dataCount; i++)
+            {
+                zdo.Set(string.Format("{0}_data_{1}", index, dataIndex), package.ReadString());
+                zdo.Set(string.Format("{0}_data__{1}", index, dataIndex++), package.ReadString());
+            }
         }
 
         private void EjectFuel(bool clearStorage)
@@ -716,24 +1136,52 @@ namespace Plateautem
             if (totalDropped == 0 && clearStorage) currentStoneStored = 0.0f;
         }
 
-        private void RPC_SetCurrentRadius(long sender, float radius)
+        private void EjectTools(bool ejectLowerTool, bool ejectRaiseTool)
         {
-            if (netView.IsOwner())
+            if (ejectLowerTool && currentLowerToolIndex >= 0)
             {
-                Jotunn.Logger.LogInfo($"currentRadius: {currentRadius}");
-                Jotunn.Logger.LogInfo($"radius: {radius}");
-                currentRadius = Mathf.Clamp(radius, 1.0f, configMaximumFlatteningRadius.Value);
+                var itemDrop = ObjectDB.instance?.GetItemPrefab(lowerToolPrefabNames[currentLowerToolIndex])?.GetComponent<ItemDrop>();
+                if (itemDrop != null)
+                {
+                    var position = transform.position + Vector3.up * 1.2f + Random.insideUnitSphere * 0.25f;
+                    var rotation = Quaternion.AngleAxis(Random.Range(0.0f, 360.0f), Vector3.up);
+                    var droppedItem = Instantiate(itemDrop.gameObject, position, rotation).GetComponent<ItemDrop>();
+                    if (droppedItem != null)
+                    {
+                        ItemDrop.LoadFromZDO(droppedItem.m_itemData, netView.GetZDO());
+                    }
+                }
+
+                currentLowerToolIndex = -1;
             }
 
-            UpdateCircle(radius);
+            if (ejectRaiseTool && currentRaiseToolIndex >= 0)
+            {
+                var itemDrop = ObjectDB.instance?.GetItemPrefab(raiseToolPrefabNames[currentRaiseToolIndex])?.GetComponent<ItemDrop>();
+                if (itemDrop != null)
+                {
+                    var position = transform.position + Vector3.up * 1.2f + Random.insideUnitSphere * 0.25f;
+                    var rotation = Quaternion.AngleAxis(Random.Range(0.0f, 360.0f), Vector3.up);
+                    var droppedItem = Instantiate(itemDrop.gameObject, position, rotation).GetComponent<ItemDrop>();
+                    if (droppedItem != null)
+                    {
+                        ItemDrop.LoadFromZDO(droppedItem.m_itemData, netView.GetZDO());
+                    }
+                }
+
+                currentRaiseToolIndex = -1;
+            }
         }
 
         private void UpdateCircle(float radius)
         {
             if (circleProjector != null)
             {
-                circleProjector.m_radius = radius + 1.5f;
-                circleProjector.m_nrOfSegments = Mathf.CeilToInt(circleProjector.m_radius * 4.0f);
+                if (circleProjector.m_radius != radius + circlePadding)
+                {
+                    circleProjector.m_radius = radius + circlePadding;
+                    circleProjector.m_nrOfSegments = Mathf.CeilToInt(circleProjector.m_radius * 4.0f);
+                }
             }
         }
 
@@ -792,7 +1240,7 @@ namespace Plateautem
             }
 
             var fuelItemsToAdd = takeAll ? Mathf.Min(spaceRemaining, playerFuelCount) : 1;
-            SetFuelItemStorage(fuelItemIndex, GetFuelItemStorage(fuelItemIndex) + fuelItemsToAdd);
+            netView.InvokeRPC("AddFuelItem", fuelItemIndex, fuelItemsToAdd);
             inventory.RemoveItem(fuelItemDisplayName, fuelItemsToAdd);
 
             user.Message(MessageHud.MessageType.Center, Localization.instance.Localize($"$msg_added {fuelItemsToAdd} {fuelItemDisplayName}"));
@@ -820,7 +1268,7 @@ namespace Plateautem
             }
 
             var stoneToAdd = takeAll ? Mathf.Min(spaceRemaining, playerFuelCount) : 1;
-            currentStoneStored += stoneToAdd;
+            netView.InvokeRPC("AddStone", stoneToAdd);
             inventory.RemoveItem(stoneItemDisplayName, stoneToAdd);
 
             user.Message(MessageHud.MessageType.Center, Localization.instance.Localize($"$msg_added {stoneToAdd} {stoneItemDisplayName}"));
@@ -883,6 +1331,103 @@ namespace Plateautem
             }
 
             currentFuelStored = fuelStored;
+        }
+
+        public static bool IsInsideNoBuildLocation(Vector3 point, float radius)
+        {
+            foreach (Location allLocation in Location.m_allLocations)
+            {
+                if (allLocation.m_noBuild && allLocation.IsInside(point, radius))
+                    return true;
+            }
+            return false;
+        }
+
+        public static bool IsInLoadedArea(Vector3 point, float radius, bool checkSelf = true)
+        {
+            var fromId = ZoneSystem.instance.GetZone(point - new Vector3(radius, 0.0f, radius));
+            var toId = ZoneSystem.instance.GetZone(point + new Vector3(radius, 0.0f, radius));
+
+            if (checkSelf)
+            {
+                var refPos = ZNet.instance.GetReferencePosition();
+                var refCenterZone = ZoneSystem.instance.GetZone(refPos);
+                bool inActiveArea = true;
+                for (int y = fromId.y; y <= toId.y; ++y)
+                {
+                    for (int x = fromId.x; x <= toId.x; ++x)
+                    {
+                        if (!ZNetScene.instance.InActiveArea(new Vector2i(x, y), refCenterZone))
+                        {
+                            inActiveArea = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (inActiveArea) return true;
+            }
+
+            foreach (var peer in ZNet.instance.GetConnectedPeers())
+            {
+                var refPos = peer.GetRefPos();
+                var refCenterZone = ZoneSystem.instance.GetZone(refPos);
+                bool inActiveArea = true;
+                for (int y = fromId.y; y <= toId.y; ++y)
+                {
+                    for (int x = fromId.x; x <= toId.x; ++x)
+                    {
+                        if (!ZNetScene.instance.InActiveArea(new Vector2i(x, y), refCenterZone))
+                        {
+                            inActiveArea = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (inActiveArea) return true;
+            }
+
+            return false;
+        }
+
+
+        [HarmonyPatch(typeof(TerrainComp))]
+        public static class Patch
+        {
+            [HarmonyPrefix]
+            [HarmonyPatch("LevelTerrain")]
+            public static bool LevelTerrain(TerrainComp __instance, Vector3 worldPos, float radius, bool square)
+            {
+                int x1;
+                int y1;
+                __instance.m_hmap.WorldToVertex(worldPos, out x1, out y1);
+                Vector3 vector3 = worldPos - __instance.transform.position;
+                float f = radius / __instance.m_hmap.m_scale;
+                int num1 = Mathf.CeilToInt(f);
+                int num2 = __instance.m_width + 1;
+                Vector2 a = new Vector2(x1, y1);
+                for (int y2 = y1 - num1; y2 <= y1 + num1; ++y2)
+                {
+                    for (int x2 = x1 - num1; x2 <= x1 + num1; ++x2)
+                    {
+                        float distance = Vector2.Distance(a, new Vector2(x2, y2));
+                        if ((square || distance <= f) && (x2 >= 0 && y2 >= 0) && (x2 < num2 && y2 < num2))
+                        {
+                            float df = 1.0f - distance / f;
+                            float height = __instance.m_hmap.GetHeight(x2, y2);
+                            float num3 = (vector3.y - height) * (df > 0.5f ? 1.0f : df / 0.5f);
+                            int index = y2 * num2 + x2;
+                            float num4 = num3 + __instance.m_smoothDelta[index];
+                            __instance.m_smoothDelta[index] = 0.0f;
+                            __instance.m_levelDelta[index] += num4;
+                            __instance.m_modifiedHeight[index] = true;
+                        }
+                    }
+                }
+
+                return false;
+            }
         }
     }
 }

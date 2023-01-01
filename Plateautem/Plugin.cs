@@ -9,6 +9,7 @@ using System.Linq;
 using UnityEngine;
 using System.Text.RegularExpressions;
 using BepInEx.Configuration;
+using HarmonyLib;
 
 namespace Plateautem
 {
@@ -20,7 +21,7 @@ namespace Plateautem
         public const string PluginName = "Plateautem";
         public const string PluginAuthor = "erkle64";
         public const string PluginGUID = "com."+PluginAuthor+"."+PluginName;
-        public const string PluginVersion = "0.1.0";
+        public const string PluginVersion = "0.3.1";
         
         public static CustomLocalization Localization = LocalizationManager.Instance.GetLocalization();
 
@@ -31,6 +32,7 @@ namespace Plateautem
             Jotunn.Logger.LogInfo("Plateautem loading");
 
             LoadConfig();
+            Plateautem.RegisterRPCs();
 
             Localization.AddTranslation("English", new Dictionary<string, string>
             {
@@ -40,14 +42,20 @@ namespace Plateautem
                 { Plateautem.msgHold, "Hold" },
                 { Plateautem.msgAll, "all" },
                 { Plateautem.msgFuel, "Fuel" },
+                { Plateautem.msgTools, "Tools" },
                 { Plateautem.msgRadius, "Radius" },
                 { Plateautem.msgResetScan, "Reset scan" },
-                { Plateautem.msgSelectFuel, "Select fuel to insert" },
+                { Plateautem.msgSelectFuel, "Select item to insert" },
+                { Plateautem.msgEject, "Eject" },
                 { Plateautem.msgEjectFuel, "Eject fuel" },
                 { Plateautem.msgEjectStone, "Eject stone" },
+                { Plateautem.msgSelectMode, "Insert item set to $1\nPress or hold E to insert $1." },
             });
 
             PrefabManager.OnVanillaPrefabsAvailable += OnVanillaPrefabsAvailable;
+
+            Harmony.CreateAndPatchAll(this.GetType().Assembly);
+            //Harmony.CreateAndPatchAll(typeof(Plateautem.Patch));
         }
 
         private void LoadConfig()
@@ -56,6 +64,20 @@ namespace Plateautem
 
             Plateautem.LoadConfig(this);
         }
+
+#if DEBUG
+        private void Update()
+        {
+            if (UnityInput.Current.GetKeyDown(KeyCode.Keypad5))
+            {
+                Jotunn.Logger.LogInfo("Activating debug batch");
+                Console.instance.TryRunCommand("devcommands");
+                Console.instance.TryRunCommand("debugmode");
+                Console.instance.TryRunCommand("env Clear");
+                Console.instance.TryRunCommand("tod 0.5");
+            }
+        }
+#endif
 
         private void OnVanillaPrefabsAvailable()
         {
