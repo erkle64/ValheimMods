@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
+using static ItemDrop;
 
 namespace Plateautem
 {
@@ -1063,6 +1064,23 @@ namespace Plateautem
             }
         }
 
+        public static void LoadFromZDO(int index, ItemData itemData, ZDO zdo)
+        {
+            string indexString = index.ToString();
+            itemData.m_durability = zdo.GetFloat(indexString + "_durability", itemData.m_durability);
+            itemData.m_stack = zdo.GetInt(indexString + "_stack", itemData.m_stack);
+            itemData.m_quality = zdo.GetInt(indexString + "_quality", itemData.m_quality);
+            itemData.m_variant = zdo.GetInt(indexString + "_variant", itemData.m_variant);
+            itemData.m_crafterID = zdo.GetLong(indexString + "_crafterID", itemData.m_crafterID);
+            itemData.m_crafterName = zdo.GetString(indexString + "_crafterName", itemData.m_crafterName);
+            int dataCount = zdo.GetInt(indexString + "_dataCount");
+            itemData.m_customData.Clear();
+            for (int i = 0; i < dataCount; i++)
+            {
+                itemData.m_customData[zdo.GetString(indexString + $"_data_{i}")] = zdo.GetString(indexString + $"_data__{i}");
+            }
+        }
+
         private void EjectFuel(bool clearStorage)
         {
             int totalDropped = 0;
@@ -1148,7 +1166,7 @@ namespace Plateautem
                     var droppedItem = Instantiate(itemDrop.gameObject, position, rotation).GetComponent<ItemDrop>();
                     if (droppedItem != null)
                     {
-                        ItemDrop.LoadFromZDO(droppedItem.m_itemData, netView.GetZDO());
+                        ItemDrop.LoadFromZDO(1, droppedItem.m_itemData, netView.GetZDO());
                     }
                 }
 
@@ -1165,7 +1183,7 @@ namespace Plateautem
                     var droppedItem = Instantiate(itemDrop.gameObject, position, rotation).GetComponent<ItemDrop>();
                     if (droppedItem != null)
                     {
-                        ItemDrop.LoadFromZDO(droppedItem.m_itemData, netView.GetZDO());
+                        ItemDrop.LoadFromZDO(2, droppedItem.m_itemData, netView.GetZDO());
                     }
                 }
 

@@ -21,7 +21,7 @@ namespace Plateautem
         public const string PluginName = "Plateautem";
         public const string PluginAuthor = "erkle64";
         public const string PluginGUID = "com."+PluginAuthor+"."+PluginName;
-        public const string PluginVersion = "0.3.1";
+        public const string PluginVersion = "0.3.3";
         
         public static CustomLocalization Localization = LocalizationManager.Instance.GetLocalization();
 
