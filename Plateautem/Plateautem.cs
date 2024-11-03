@@ -5,6 +5,8 @@ using Jotunn.Entities;
 using Jotunn.Managers;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
@@ -349,7 +351,21 @@ namespace Plateautem
                         float fuelItemValue = 1.0f;
                         if (match.Groups.Count >= 3 && !string.IsNullOrWhiteSpace(match.Groups[2].Value))
                         {
-                            fuelItemValue = float.Parse(match.Groups[2].Value);
+                            try
+                            {
+                                fuelItemValue = float.Parse(match.Groups[2].Value);
+                            }
+                            catch
+                            {
+                                try
+                                {
+                                    fuelItemValue = float.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture);
+                                }
+                                catch
+                                {
+                                    fuelItemValue = 1.0f;
+                                }
+                            }
                         }
                         fuelItems.Add(new FuelItem
                         {
@@ -533,7 +549,7 @@ namespace Plateautem
             while (true)
             {
                 var zoneLoaded = false;
-                var zoneId = ZoneSystem.instance.GetZone(position);
+                var zoneId = ZoneSystem.GetZone(position);
                 for (int y = zoneId.y - 1; y <= zoneId.y + 1; y++)
                 {
                     for (int x = zoneId.x - 1; x <= zoneId.x + 1; x++)
@@ -937,7 +953,7 @@ namespace Plateautem
             if (configShowTools.Value) stringBuilder.Append($"{msgTools}: {GetToolNamesText(" + ")}\n");
             if (configShowFillBars.Value) stringBuilder.Append($"[<color=orange>{TextProgressBar(totalFuelStored / configMaximumFuel.Value, 12)}</color>]\n");
             if (configShowFillNumbers.Value) stringBuilder.Append($"{msgFuel}: {totalFuelStored:0.0}/{configMaximumFuel.Value}\n");
-            if (configShowFillBars.Value) stringBuilder.Append($"[<color=grey>{TextProgressBar(currentStoneStored / configMaximumStone.Value, 12)}</color>]\n");
+            if (configShowFillBars.Value) stringBuilder.Append($"[<color=#7F7F7FFF>{TextProgressBar(currentStoneStored / configMaximumStone.Value, 12)}</color>]\n");
             if (configShowFillNumbers.Value) stringBuilder.Append($"{stoneItemDisplayName}: {currentStoneStored:0.0}/{configMaximumStone.Value}\n");
 
             if (configShowSelection.Value)
@@ -1025,6 +1041,9 @@ namespace Plateautem
                 package.Write(kv.Key);
                 package.Write(kv.Value);
             }
+
+            package.Write((byte)item.m_worldLevel);
+            package.Write(item.m_pickedUp);
         }
 
         private static void ReadItem(ZPackage package, ItemDrop.ItemData item)
@@ -1043,6 +1062,9 @@ namespace Plateautem
                 var value = package.ReadString();
                 item.m_customData[key] = value;
             }
+
+            item.m_worldLevel = package.ReadByte();
+            item.m_pickedUp = package.ReadBool();
         }
 
         private static void ReadItemToZDO(int index, ZPackage package, ZDO zdo)
@@ -1062,6 +1084,9 @@ namespace Plateautem
                 zdo.Set(string.Format("{0}_data_{1}", index, dataIndex), package.ReadString());
                 zdo.Set(string.Format("{0}_data__{1}", index, dataIndex++), package.ReadString());
             }
+
+            zdo.Set(index + "_worldLevel", package.ReadByte());
+            zdo.Set(index + "_pickedUp", package.ReadBool());
         }
 
         public static void LoadFromZDO(int index, ItemData itemData, ZDO zdo)
@@ -1079,6 +1104,9 @@ namespace Plateautem
             {
                 itemData.m_customData[zdo.GetString(indexString + $"_data_{i}")] = zdo.GetString(indexString + $"_data__{i}");
             }
+
+            itemData.m_worldLevel = (byte)zdo.GetInt(index + "_worldLevel", itemData.m_worldLevel);
+            itemData.m_pickedUp = zdo.GetBool(index + "_pickedUp", itemData.m_pickedUp);
         }
 
         private void EjectFuel(bool clearStorage)
@@ -1353,7 +1381,7 @@ namespace Plateautem
 
         public static bool IsInsideNoBuildLocation(Vector3 point, float radius)
         {
-            foreach (Location allLocation in Location.m_allLocations)
+            foreach (Location allLocation in Location.s_allLocations)
             {
                 if (allLocation.m_noBuild && allLocation.IsInside(point, radius))
                     return true;
@@ -1363,19 +1391,19 @@ namespace Plateautem
 
         public static bool IsInLoadedArea(Vector3 point, float radius, bool checkSelf = true)
         {
-            var fromId = ZoneSystem.instance.GetZone(point - new Vector3(radius, 0.0f, radius));
-            var toId = ZoneSystem.instance.GetZone(point + new Vector3(radius, 0.0f, radius));
+            var fromId = ZoneSystem.GetZone(point - new Vector3(radius, 0.0f, radius));
+            var toId = ZoneSystem.GetZone(point + new Vector3(radius, 0.0f, radius));
 
             if (checkSelf)
             {
                 var refPos = ZNet.instance.GetReferencePosition();
-                var refCenterZone = ZoneSystem.instance.GetZone(refPos);
+                var refCenterZone = ZoneSystem.GetZone(refPos);
                 bool inActiveArea = true;
                 for (int y = fromId.y; y <= toId.y; ++y)
                 {
                     for (int x = fromId.x; x <= toId.x; ++x)
                     {
-                        if (!ZNetScene.instance.InActiveArea(new Vector2i(x, y), refCenterZone))
+                        if (!ZNetScene.InActiveArea(new Vector2i(x, y), refCenterZone))
                         {
                             inActiveArea = false;
                             break;
@@ -1389,13 +1417,13 @@ namespace Plateautem
             foreach (var peer in ZNet.instance.GetConnectedPeers())
             {
                 var refPos = peer.GetRefPos();
-                var refCenterZone = ZoneSystem.instance.GetZone(refPos);
+                var refCenterZone = ZoneSystem.GetZone(refPos);
                 bool inActiveArea = true;
                 for (int y = fromId.y; y <= toId.y; ++y)
                 {
                     for (int x = fromId.x; x <= toId.x; ++x)
                     {
-                        if (!ZNetScene.instance.InActiveArea(new Vector2i(x, y), refCenterZone))
+                        if (!ZNetScene.InActiveArea(new Vector2i(x, y), refCenterZone))
                         {
                             inActiveArea = false;
                             break;

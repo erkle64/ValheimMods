@@ -10,6 +10,7 @@ using UnityEngine;
 using System.Text.RegularExpressions;
 using BepInEx.Configuration;
 using HarmonyLib;
+using System.Globalization;
 
 namespace Plateautem
 {
@@ -21,7 +22,7 @@ namespace Plateautem
         public const string PluginName = "Plateautem";
         public const string PluginAuthor = "erkle64";
         public const string PluginGUID = "com."+PluginAuthor+"."+PluginName;
-        public const string PluginVersion = "0.3.3";
+        public const string PluginVersion = "0.3.8";
         
         public static CustomLocalization Localization = LocalizationManager.Instance.GetLocalization();
 
@@ -100,13 +101,27 @@ namespace Plateautem
                         if (match.Groups.Count >= 2)
                         {
                             string requirementName = match.Groups[1].Value;
-                            int reqirementCount = 1;
+                            int requirementCount = 1;
                             if (match.Groups.Count >= 3 && !string.IsNullOrWhiteSpace(match.Groups[2].Value))
                             {
-                                reqirementCount = int.Parse(match.Groups[2].Value);
+                                try
+                                {
+                                    requirementCount = int.Parse(match.Groups[2].Value);
+                                }
+                                catch
+                                {
+                                    try
+                                    {
+                                        requirementCount = int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture);
+                                    }
+                                    catch
+                                    {
+                                        requirementCount = 1;
+                                    }
+                                }
                             }
-                            plateautemPieceConfig.AddRequirement(new RequirementConfig(requirementName, reqirementCount, 0, true));
-                            Jotunn.Logger.LogInfo($"Adding {requirementName}x{reqirementCount} as requirement for Plateautem.");
+                            plateautemPieceConfig.AddRequirement(new RequirementConfig(requirementName, requirementCount, 0, true));
+                            Jotunn.Logger.LogInfo($"Adding {requirementName}x{requirementCount} as requirement for Plateautem.");
                         }
                     }
                 }
